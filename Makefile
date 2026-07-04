@@ -1,4 +1,4 @@
-.PHONY: up down logs logs-ingest logs-delay ingest schema-list load-gtfs kafka-read-delays
+.PHONY: up down logs logs-ingest logs-delay ingest schema-list load-gtfs kafka-read-delays status
 
 up:
 	docker-compose up -d
@@ -26,3 +26,11 @@ logs-delay:
 
 kafka-read-delays:
 	docker-compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic delay-predictions --from-beginning --max-messages 10 --timeout-ms 60000
+
+status:
+	@echo === Git status ===
+	@git status
+	@echo === Docker containers ===
+	@docker ps --format "table {{.Names}}\t{{.Status}}"
+	@echo === Kafka topics ===
+	@docker-compose exec -T kafka kafka-topics --bootstrap-server localhost:9092 --list
