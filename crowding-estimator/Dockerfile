@@ -3,13 +3,13 @@
 # Build stage
 FROM maven:3.9-eclipse-temurin-17 AS build
 
-WORKDIR /build/delay-predictor
+WORKDIR /build/crowding-estimator
 
-COPY delay-predictor/pom.xml .
+COPY crowding-estimator/pom.xml .
 RUN mvn -q -B dependency:go-offline
 
 COPY schemas /build/schemas
-COPY delay-predictor/src ./src
+COPY crowding-estimator/src ./src
 RUN mvn -q -B package -DskipTests
 
 # Runtime stage
@@ -20,6 +20,6 @@ RUN apk add --no-cache libstdc++
 
 WORKDIR /app
 
-COPY --from=build /build/delay-predictor/target/delay-predictor-1.0.0-SNAPSHOT-jar-with-dependencies.jar app.jar
+COPY --from=build /build/crowding-estimator/target/crowding-estimator-1.0.0-SNAPSHOT-jar-with-dependencies.jar app.jar
 
 CMD ["java", "-jar", "app.jar"]

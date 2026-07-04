@@ -62,12 +62,14 @@ TTC GTFS-RT feed (protobuf, polled every 15s)
 
 ```
 ttc-intelligence/
-├── ingestion-service/     Go — GTFS-RT poller / Avro Kafka producer
+├── schemas/               Shared Avro schemas (single source of truth)
+├── ingestion-service/     Go — GTFS-RT vehicles + alerts pollers / Avro Kafka producer
 ├── gtfs-loader/           Python — one-shot static GTFS → TimescaleDB loader
 ├── delay-predictor/       Java + Kafka Streams — headway/delay scoring
+├── crowding-estimator/    Java + Kafka Streams — per-vehicle crowding levels
 ├── ripple-detector/       Java + Kafka Streams (stub)
-├── crowding-estimator/    Java + Kafka Streams (stub)
 ├── api-gateway/           Java + Spring Boot (stub)
+├── scripts/               Demo tooling (service-alert injector)
 ├── dashboard/             React (not yet scaffolded)
 ├── k8s/                   Kubernetes manifests (not yet written)
 ├── docker-compose.yml     Kafka, Zookeeper, Schema Registry, Redis, TimescaleDB + app services
@@ -77,7 +79,9 @@ ttc-intelligence/
 
 ## Event serialization
 
-Vehicle position events are serialized as **Avro** using the Confluent wire format (magic byte + 4-byte schema id + Avro binary). The schema lives at `ingestion-service/avro/vehicle_position.avsc` (mirrored in `delay-predictor/src/main/avro/`) and is registered with **Schema Registry** under the subject `vehicle-positions-value` at ingestion startup. The delay predictor generates its `VehiclePosition` class from the same schema at build time via `avro-maven-plugin`.
+Events are serialized as **Avro** using the Confluent wire format (magic byte + 4-byte schema id + Avro binary). All schemas live in the shared `schemas/` directory — `vehicle_position.avsc` (subject `vehicle-positions-value`, currently at version 2 after a backward-compatible evolution adding `trip_id`/`direction_id`/`current_stop_sequence`) and `service_alert.avsc` (subject `service-alerts-value`). The ingestion service registers both at startup; the Java services generate their record classes from the same files at build time via `avro-maven-plugin` (`../schemas` relative to each pom).
+
+One TTC-specific wrinkle: the live feed populates `trip_id` and `current_stop_sequence` but **not** `direction_id`. The GTFS loader therefore also loads a `trips` (trip_id → direction_id) lookup table, which the crowding estimator holds in memory to resolve direction per vehicle.
 
 ## Local setup
 
@@ -93,16 +97,18 @@ Vehicle position events are serialized as **Avro** using the Confluent wire form
 make up
 ```
 
-This starts Zookeeper, Kafka (broker reachable at `localhost:9092`), Schema Registry (`localhost:8081`), Redis, TimescaleDB, the containerized ingestion service, and the delay predictor. Kafka topics (`vehicle-positions`, `service-alerts`, `delay-predictions`, `ripple-alerts`, `crowding-estimates`) are created by a one-shot `kafka-init` container, and the static GTFS schedule is loaded by a one-shot `gtfs-loader` container.
+This starts Zookeeper, Kafka (broker reachable at `localhost:9092`), Schema Registry (`localhost:8081`), Redis, TimescaleDB, the containerized ingestion service (vehicles + alerts pollers), the delay predictor, and the crowding estimator. Kafka topics (`vehicle-positions`, `service-alerts`, `delay-predictions`, `ripple-alerts`, `crowding-estimates`) are created by a one-shot `kafka-init` container, and the static GTFS schedule is loaded by a one-shot `gtfs-loader` container.
 
 Useful targets:
 
 ```bash
-make logs          # all logs
-make logs-ingest   # ingestion service only
-make logs-delay    # delay predictor only
-make schema-list   # registered Schema Registry subjects
-make down          # stop everything
+make status          # git status + containers + Kafka topics
+make logs            # all logs
+make logs-ingest     # ingestion service only
+make logs-delay      # delay predictor only
+make logs-crowding   # crowding estimator only
+make schema-list     # registered Schema Registry subjects
+make down            # stop everything
 ```
 
 ### 2. Load / refresh the static GTFS schedule
@@ -113,16 +119,37 @@ make load-gtfs
 
 Downloads the TTC static GTFS feed, computes scheduled headways per route per hour of day (weekday service, busier direction), and full-refreshes the `scheduled_headways` and `routes` tables in TimescaleDB. Re-run whenever TTC publishes a new schedule.
 
-### 3. Read delay predictions
+### 3. Read the output topics
 
 ```bash
-make kafka-read-delays
+make kafka-read           # live vehicle-position events (Avro → JSON)
+make kafka-read-delays    # per-route delay predictions
+make kafka-read-crowding  # per-vehicle crowding estimates
+make kafka-read-alerts    # service alerts (real + injected)
 ```
 
-Prints delay prediction JSON from the `delay-predictions` topic. One message per active route per 5-minute window:
+Delay predictions — one message per active route per 5-minute window:
 
 ```json
 {"route_id":"504","window_start":1719530400000,"window_end":1719530700000,"actual_headway_minutes":8.5,"scheduled_headway_minutes":5.0,"delay_score":3.5,"computed_at":1719530712000}
+```
+
+Crowding estimates — one message per vehicle per window, classified from the headway gap to the vehicle ahead:
+
+```json
+{"vehicle_id":"4218","route_id":"504","direction_id":0,"gap_ahead_minutes":9.2,"crowding_ratio":1.84,"scheduled_headway_minutes":5.0,"crowding_level":"LIKELY_CROWDED","window_end":1719530700000,"computed_at":1719530712000}
+```
+
+### 4. Inject a demo service alert
+
+```bash
+make inject-alert
+```
+
+Publishes a fake `NO_SERVICE` alert for Line 1 through the same Avro schema / Schema Registry path as real alerts — useful when the live TTC alerts feed is quiet. Override any field via env vars (`ALERT_HEADER`, `ALERT_EFFECT`, `ALERT_ROUTES`, `ALERT_STOPS`, `ALERT_DESCRIPTION`, ...), e.g.:
+
+```bash
+docker-compose run --rm -e ALERT_HEADER="Line 2: Delays at Kennedy" -e ALERT_ROUTES=2 alert-injector
 ```
 
 ### Running the ingestion service outside Docker (dev loop)

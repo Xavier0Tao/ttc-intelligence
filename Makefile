@@ -1,4 +1,4 @@
-.PHONY: up down logs logs-ingest logs-delay ingest schema-list load-gtfs kafka-read-delays status
+.PHONY: up down logs logs-ingest logs-delay logs-crowding ingest schema-list load-gtfs kafka-read kafka-read-delays kafka-read-alerts kafka-read-crowding inject-alert status
 
 up:
 	docker-compose up -d
@@ -24,8 +24,23 @@ load-gtfs:
 logs-delay:
 	docker-compose logs -f delay-predictor
 
+kafka-read:
+	docker-compose exec schema-registry kafka-avro-console-consumer --bootstrap-server kafka:29092 --topic vehicle-positions --max-messages 10 --timeout-ms 60000 --property schema.registry.url=http://localhost:8081
+
 kafka-read-delays:
 	docker-compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic delay-predictions --from-beginning --max-messages 10 --timeout-ms 60000
+
+logs-crowding:
+	docker-compose logs -f crowding-estimator
+
+kafka-read-crowding:
+	docker-compose exec kafka bash -c "kafka-console-consumer --bootstrap-server localhost:9092 --topic crowding-estimates --from-beginning --timeout-ms 30000 2>/dev/null | tail -10"
+
+inject-alert:
+	docker-compose build alert-injector && docker-compose run --rm alert-injector
+
+kafka-read-alerts:
+	docker-compose exec schema-registry bash -c "kafka-avro-console-consumer --bootstrap-server kafka:29092 --topic service-alerts --from-beginning --timeout-ms 30000 --property schema.registry.url=http://localhost:8081 2>/dev/null | grep '^{' | tail -10"
 
 status:
 	@echo === Git status ===

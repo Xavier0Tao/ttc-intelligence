@@ -58,8 +58,8 @@ services:
 
   ingestion-service:
     build:
-      context: ./ingestion-service
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ingestion-service/Dockerfile
     container_name: ttc-ingestion-service
     depends_on:
       kafka:
@@ -90,8 +90,8 @@ services:
 
   delay-predictor:
     build:
-      context: ./delay-predictor
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: delay-predictor/Dockerfile
     container_name: ttc-delay-predictor
     depends_on:
       kafka:
@@ -109,6 +109,44 @@ services:
       DB_USER: ttc
       DB_PASSWORD: ttc
     restart: unless-stopped
+
+  crowding-estimator:
+    build:
+      context: .
+      dockerfile: crowding-estimator/Dockerfile
+    container_name: ttc-crowding-estimator
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ttc_intelligence
+      DB_USER: ttc
+      DB_PASSWORD: ttc
+    restart: unless-stopped
+
+  alert-injector:
+    build:
+      context: .
+      dockerfile: scripts/Dockerfile
+    container_name: ttc-alert-injector
+    profiles: ["tools"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    restart: "no"
 
   gtfs-loader:
     build:

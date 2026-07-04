@@ -14,6 +14,7 @@ from collections import defaultdict
 from datetime import date
 
 import psycopg2
+import psycopg2.extras
 import requests
 
 GTFS_URL = os.environ.get(
@@ -103,12 +104,25 @@ def main():
         print(f"restricting to {len(weekday_services)} weekday service pattern(s)", flush=True)
 
     print("parsing trips.txt ...", flush=True)
+    # trip_to_route drives headway computation (weekday service only); all_trips
+    # feeds the trips lookup table used by the crowding estimator to resolve
+    # direction_id from a live trip_id, because the TTC GTFS-RT feed does not
+    # populate trip.direction_id. Live trips can belong to any service day, so
+    # this table is NOT filtered to weekday services.
     trip_to_route = {}
+    all_trips = []
     for row in read_csv(zf, "trips.txt"):
+        route_id = row["route_id"]
+        direction = row.get("direction_id", "")
+        all_trips.append((
+            row["trip_id"],
+            route_id,
+            int(direction) if direction.strip() else None,
+        ))
         if weekday_services is not None and row.get("service_id") not in weekday_services:
             continue
-        trip_to_route[row["trip_id"]] = (row["route_id"], row.get("direction_id", "0"))
-    print(f"  {len(trip_to_route)} weekday trips", flush=True)
+        trip_to_route[row["trip_id"]] = (route_id, direction or "0")
+    print(f"  {len(all_trips)} trips total, {len(trip_to_route)} weekday trips", flush=True)
 
     print("parsing stop_times.txt (streaming, this is the big one) ...", flush=True)
     # First stop of each trip = (lowest stop_sequence, its arrival_time)
@@ -176,9 +190,27 @@ def main():
             """
         )
 
-        # Full refresh: stale (route, hour) rows from a previous feed version
-        # would otherwise linger forever, since we only upsert below.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trips (
+              trip_id TEXT PRIMARY KEY,
+              route_id TEXT NOT NULL,
+              direction_id INTEGER
+            );
+            """
+        )
+
+        # Full refresh: stale rows from a previous feed version would
+        # otherwise linger forever, since we only upsert below.
         cur.execute("DELETE FROM scheduled_headways;")
+        cur.execute("DELETE FROM trips;")
+
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO trips (trip_id, route_id, direction_id) VALUES %s ON CONFLICT (trip_id) DO NOTHING",
+            all_trips,
+            page_size=5000,
+        )
 
         for route_id, (short_name, route_type) in routes.items():
             cur.execute(
@@ -204,7 +236,8 @@ def main():
             )
     conn.close()
 
-    print(f"\nloaded {len(routes)} routes and {len(headways)} scheduled headway rows into TimescaleDB")
+    print(f"\nloaded {len(routes)} routes, {len(all_trips)} trips, "
+          f"and {len(headways)} scheduled headway rows into TimescaleDB")
 
     # Summary for route 504 (King streetcar)
     print("\nroute 504 (King) scheduled headways by hour:")

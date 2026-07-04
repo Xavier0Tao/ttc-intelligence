@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "ServiceAlert",
+  "namespace": "ca.ttc.intelligence",
+  "fields": [
+    {"name": "alert_id", "type": "string"},
+    {"name": "effect", "type": "string"},
+    {"name": "cause", "type": ["null", "string"], "default": null},
+    {"name": "header_text", "type": "string"},
+    {"name": "description_text", "type": ["null", "string"], "default": null},
+    {"name": "affected_route_ids", "type": {"type": "array", "items": "string"}},
+    {"name": "affected_stop_ids", "type": {"type": "array", "items": "string"}},
+    {"name": "active_since", "type": "long"},
+    {"name": "timestamp", "type": "long"}
+  ]
+}

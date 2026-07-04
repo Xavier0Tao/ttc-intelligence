@@ -79,7 +79,8 @@
                             <goal>schema</goal>
                         </goals>
                         <configuration>
-                            <sourceDirectory>${project.basedir}/src/main/avro</sourceDirectory>
+                            <!-- Shared schema directory at the monorepo root -->
+                            <sourceDirectory>${project.basedir}/../schemas</sourceDirectory>
                             <outputDirectory>${project.build.directory}/generated-sources/avro</outputDirectory>
                             <stringType>String</stringType>
                         </configuration>
