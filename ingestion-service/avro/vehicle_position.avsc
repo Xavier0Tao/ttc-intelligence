@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "VehiclePosition",
+  "namespace": "ca.ttc.intelligence",
+  "fields": [
+    {"name": "vehicle_id", "type": "string"},
+    {"name": "route_id", "type": "string"},
+    {"name": "latitude", "type": "double"},
+    {"name": "longitude", "type": "double"},
+    {"name": "bearing", "type": ["null", "float"], "default": null},
+    {"name": "speed", "type": ["null", "float"], "default": null},
+    {"name": "timestamp", "type": "long"},
+    {"name": "occupancy", "type": ["null", "string"], "default": null}
+  ]
+}

@@ -1,0 +1,20 @@
+# Go
+ingestion-service/ingestion-service
+ingestion-service/*.exe
+
+# Java / Maven
+target/
+*.class
+
+# Node
+node_modules/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db

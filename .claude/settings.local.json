@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(go version)",
+      "PowerShell(java -version)",
+      "PowerShell(mvn -version)",
+      "PowerShell(docker --version)",
+      "PowerShell(docker compose version)",
+      "Bash(python3 -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")",
+      "Bash(python -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")"
+    ]
+  }
+}
