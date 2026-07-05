@@ -68,9 +68,9 @@ ttc-intelligence/
 ├── delay-predictor/       Java + Kafka Streams — headway/delay scoring
 ├── crowding-estimator/    Java + Kafka Streams — per-vehicle crowding levels
 ├── ripple-detector/       Java + Kafka Streams — cascades subway alerts to feeder routes
-├── api-gateway/           Java + Spring Boot (stub)
+├── api-gateway/           Java + Spring Boot — Kafka→Redis sync, WebSocket firehose, REST
 ├── scripts/               Demo tooling (service-alert injector)
-├── dashboard/             React (not yet scaffolded)
+├── dashboard/             React + Vite + Leaflet — live map, delay panel, alert feed
 ├── k8s/                   Kubernetes manifests (not yet written)
 ├── docker-compose.yml     Kafka, Zookeeper, Schema Registry, Redis, TimescaleDB + app services
 ├── Makefile
@@ -165,6 +165,13 @@ Publishes a fake `NO_SERVICE` alert for Line 1 through the same Avro schema / Sc
 ```bash
 docker-compose run --rm -e ALERT_HEADER="Line 2: Delays at Kennedy" -e ALERT_ROUTES=2 alert-injector
 ```
+
+### 5. Live dashboard
+
+`make up` includes the API gateway (`localhost:8080`) and the dashboard (`http://localhost:3000`):
+
+- **Gateway** consumes all five topics into Redis (`vehicle:*` TTL 120s, `crowding:*` TTL 10m, `delay:*`, `alert:*`, `ripple:*` TTL 30m) and serves a WebSocket firehose at `/ws/live` (snapshot on connect, then tagged updates) plus REST: `/api/routes`, `/api/routes/{route}/stops?direction=0`, `/api/snapshot`, `/api/alerts/active`. Smoke-test with `make api-test`.
+- **Dashboard** is a Vite/React/Leaflet app served by nginx, which also proxies `/api` and `/ws` to the gateway (single origin). Vehicles render as type-specific silhouettes (bus/streetcar/subway, inferred from `route_type`) in TTC red with a crowding-colored ring (green NORMAL / red LIKELY_CROWDED / blue LIKELY_EMPTY / gray UNKNOWN). Hovering a route in the delay panel overlays that route's stops. The alert feed distinguishes cascaded ripple alerts, and the connection indicator reconnects with exponential backoff (1s→30s), resyncing via `/api/snapshot`.
 
 ### Running the ingestion service outside Docker (dev loop)
 

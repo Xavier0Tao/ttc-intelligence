@@ -1,0 +1,63 @@
+[33mcommit f3461a2d18eb35c76ddbd85bc092877088933fc9[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m)[m
+Author: Tao Wang <xaviertaowang@gmail.com>
+Date:   Sun Jul 5 00:24:25 2026 -0400
+
+    untrack local Claude Code settings
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+[33mcommit 9917c793c6f99d43b7d2954cb5926f59bdab0f75[m
+Author: Tao Wang <xaviertaowang@gmail.com>
+Date:   Sun Jul 5 00:23:53 2026 -0400
+
+    session 4: merged GTFS feed, feeder-route mapping, compacted alert topics, ripple detector
+    
+    - gtfs-loader: switched to the City of Toronto merged GTFS (all modes);
+      identifies the 70 subway stations via route_type=1 platform join
+      (location_type=1 alone also matches bus loops) and loads
+      station_feeder_routes = surface routes within 300m haversine per station
+    - service-alerts and ripple-alerts are compacted topics keyed by
+      alert_id / ripple_id (kafka-init --config cleanup.policy=compact)
+    - ripple-detector: consumes service-alerts as a KTable (upsert semantics),
+      joins affected_stop_ids to station_feeder_routes, emits one cascade alert
+      per feeder route to ripple-alerts; WARNs visibly on non-subway alerts
+    - inject_alert.py defaults now use real station ids (Bloor-Yonge 99999,
+      St George 99972) so the demo cascades end to end
+    - Makefile: logs-ripple, kafka-read-ripple
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+[33mcommit d3a324665578092e991e04f86c4ff19700e6aa23[m
+Author: Tao Wang <xaviertaowang@gmail.com>
+Date:   Sat Jul 4 19:07:24 2026 -0400
+
+    session 3: shared schemas + v2 evolution, service alerts ingestion, crowding estimator
+    
+    - schemas/ is now the single source of truth for Avro schemas; both Java
+      services generate classes from it and the Go service loads it at runtime
+    - vehicle_position.avsc evolved (v2): adds nullable trip_id, direction_id,
+      current_stop_sequence
+    - ingestion-service: second poller for GTFS-RT service alerts (30s) with
+      content-fingerprint dedup, publishing ServiceAlert Avro to service-alerts
+    - scripts/inject_alert.py + make inject-alert: env-configurable demo alerts
+    - crowding-estimator: per-vehicle crowding from headway gap to the vehicle
+      ahead per route+direction window; direction resolved via static-GTFS trips
+      table (TTC feed omits direction_id); levels LIKELY_CROWDED/NORMAL/
+      LIKELY_EMPTY/UNKNOWN on crowding-estimates
+    - gtfs-loader: loads trips (trip_id -> direction_id) lookup table
+    - Makefile: kafka-read, kafka-read-alerts, kafka-read-crowding, logs-crowding,
+      inject-alert targets
+    
+    Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+[33mcommit 6e224d80ce3e12276288092e45f854b7f23e3391[m[33m ([m[1;31morigin/main[m[33m)[m
+Author: Tao Wang <xaviertaowang@gmail.com>
+Date:   Sat Jul 4 15:15:26 2026 -0400
+
+    session 2: avro+schema registry, gtfs loader, delay predictor kafka streams
+
+[33mcommit fe2992b6c33c3dd6c1cdb0d41d0a4cfa2577a78f[m
+Author: Tao Wang <xaviertaowang@gmail.com>
+Date:   Sat Jul 4 14:55:46 2026 -0400
+
+    initial scaffold: ingestion service, docker-compose, Makefile

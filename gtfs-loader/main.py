@@ -186,18 +186,43 @@ def main():
     # this table is NOT filtered to weekday services.
     trip_to_route = {}
     all_trips = []
+    # For route_stops we must NOT merge stops across branch variants of a
+    # route: each (route, direction) can run several shapes (branches,
+    # short-turns), and mixing their stop_sequences produces a fake ordering.
+    # Instead, pick the most-frequent shape per (route short name, direction)
+    # as the representative path, and take stop sequences from one trip of
+    # that shape only.
+    shape_trip_counts = defaultdict(lambda: defaultdict(int))
+    first_trip_of_shape = {}
     for row in read_csv(zf, "trips.txt"):
+        trip_id = row["trip_id"]
         route_id = row["route_id"]
         direction = row.get("direction_id", "")
         all_trips.append((
-            row["trip_id"],
+            trip_id,
             route_id,
             int(direction) if direction.strip() else None,
         ))
+
+        if route_id in routes:
+            short_name = routes[route_id][0] or route_id
+            dir_id = int(direction) if direction.strip() else 0
+            shape_id = row.get("shape_id", "").strip()
+            shape_trip_counts[(short_name, dir_id)][shape_id] += 1
+            first_trip_of_shape.setdefault((short_name, dir_id, shape_id), trip_id)
+
         if weekday_services is not None and row.get("service_id") not in weekday_services:
             continue
-        trip_to_route[row["trip_id"]] = (route_id, direction or "0")
-    print(f"  {len(all_trips)} trips total, {len(trip_to_route)} weekday trips", flush=True)
+        trip_to_route[trip_id] = (route_id, direction or "0")
+
+    # rep_trips: one representative trip per (route short name, direction),
+    # from the dominant shape.
+    rep_trips = {}
+    for (short_name, dir_id), counts in shape_trip_counts.items():
+        dominant_shape = max(counts.items(), key=lambda kv: kv[1])[0]
+        rep_trips[first_trip_of_shape[(short_name, dir_id, dominant_shape)]] = (short_name, dir_id)
+    print(f"  {len(all_trips)} trips total, {len(trip_to_route)} weekday trips, "
+          f"{len(rep_trips)} representative (route, direction) trips", flush=True)
 
     print("parsing stops.txt ...", flush=True)
     # stop_id -> (lat, lon, name, location_type, parent_station)
@@ -223,6 +248,9 @@ def main():
     # feeder-route mapping.
     trip_first_arrival = {}
     stop_routes = defaultdict(set)
+    # (route short name, direction) -> [(stop_sequence, stop_id)] from that
+    # pair's single representative trip (dominant shape) only.
+    rep_route_stops = defaultdict(list)
     rows = 0
     for row in read_csv(zf, "stop_times.txt"):
         rows += 1
@@ -231,6 +259,12 @@ def main():
         route_id = all_trip_to_route.get(trip_id)
         if route_id is not None:
             stop_routes[row["stop_id"]].add(route_id)
+
+        rep_key = rep_trips.get(trip_id)
+        if rep_key is not None:
+            seq_raw = row.get("stop_sequence", "").strip()
+            if seq_raw:
+                rep_route_stops[rep_key].append((int(seq_raw), row["stop_id"]))
 
         arrival = row.get("arrival_time", "").strip()
         if not arrival:
@@ -241,6 +275,21 @@ def main():
             trip_first_arrival[trip_id] = (seq, arrival)
     print(f"  {rows} stop_time rows, {len(trip_first_arrival)} trips with arrivals, "
           f"{len(stop_routes)} stops with service", flush=True)
+
+    # One row per stop per (route short name, direction), in the dominant
+    # shape's actual visiting order — geographically continuous by
+    # construction. A shape may visit a stop twice (loops); keep the first.
+    route_stops = []
+    for (short_name, dir_id), seq_stops in rep_route_stops.items():
+        seen = set()
+        for seq, stop_id in sorted(seq_stops):
+            info = stops.get(stop_id)
+            if info is None or stop_id in seen:
+                continue
+            seen.add(stop_id)
+            route_stops.append((short_name, dir_id, stop_id, info[2], info[0], info[1], seq))
+    print(f"computed {len(route_stops)} route-stop rows "
+          f"across {len(rep_route_stops)} (route, direction) paths", flush=True)
 
     # Count trips per route per direction per hour, based on each trip's first
     # departure. Keyed by route_short_name (e.g. "504"), not the TTC-internal
@@ -318,11 +367,37 @@ def main():
             """
         )
 
+        # DROP rather than IF NOT EXISTS: the schema gained direction_id and
+        # this table is loader-owned, full-refresh data anyway.
+        cur.execute("DROP TABLE IF EXISTS route_stops;")
+        cur.execute(
+            """
+            CREATE TABLE route_stops (
+              route_id TEXT NOT NULL,
+              direction_id INTEGER NOT NULL,
+              stop_id TEXT NOT NULL,
+              stop_name TEXT NOT NULL,
+              latitude DOUBLE PRECISION NOT NULL,
+              longitude DOUBLE PRECISION NOT NULL,
+              stop_sequence INTEGER NOT NULL,
+              PRIMARY KEY (route_id, direction_id, stop_id)
+            );
+            """
+        )
+
         # Full refresh: stale rows from a previous feed version would
         # otherwise linger forever, since we only upsert below.
         cur.execute("DELETE FROM scheduled_headways;")
         cur.execute("DELETE FROM trips;")
         cur.execute("DELETE FROM station_feeder_routes;")
+
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO route_stops (route_id, direction_id, stop_id, stop_name, latitude, longitude, stop_sequence) "
+            "VALUES %s ON CONFLICT (route_id, direction_id, stop_id) DO NOTHING",
+            route_stops,
+            page_size=5000,
+        )
 
         psycopg2.extras.execute_values(
             cur,

@@ -110,6 +110,46 @@ services:
       DB_PASSWORD: ttc
     restart: unless-stopped
 
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    container_name: ttc-api-gateway
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKER: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ttc_intelligence
+      DB_USER: ttc
+      DB_PASSWORD: ttc
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: ttc-dashboard
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
   ripple-detector:
     build:
       context: .

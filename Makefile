@@ -1,4 +1,4 @@
-.PHONY: up down logs logs-ingest logs-delay logs-crowding logs-ripple ingest schema-list load-gtfs kafka-read kafka-read-delays kafka-read-alerts kafka-read-crowding kafka-read-ripple inject-alert status
+.PHONY: up down logs logs-ingest logs-delay logs-crowding logs-ripple logs-gateway logs-dashboard ingest schema-list load-gtfs kafka-read kafka-read-delays kafka-read-alerts kafka-read-crowding kafka-read-ripple inject-alert api-test status
 
 up:
 	docker-compose up -d
@@ -41,6 +41,23 @@ logs-ripple:
 
 kafka-read-ripple:
 	docker-compose exec kafka bash -c "kafka-console-consumer --bootstrap-server localhost:9092 --topic ripple-alerts --from-beginning --timeout-ms 30000 2>/dev/null | tail -10"
+
+logs-gateway:
+	docker-compose logs -f api-gateway
+
+logs-dashboard:
+	docker-compose logs -f dashboard
+
+api-test:
+	@echo === GET /api/routes ===
+	curl -s http://localhost:8080/api/routes
+	@echo.
+	@echo === GET /api/snapshot ===
+	curl -s http://localhost:8080/api/snapshot
+	@echo.
+	@echo === GET /api/alerts/active ===
+	curl -s http://localhost:8080/api/alerts/active
+	@echo.
 
 inject-alert:
 	docker-compose build alert-injector && docker-compose run --rm alert-injector
