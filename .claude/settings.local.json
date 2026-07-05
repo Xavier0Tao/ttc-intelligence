@@ -7,7 +7,15 @@
       "PowerShell(docker --version)",
       "PowerShell(docker compose version)",
       "Bash(python3 -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")",
-      "Bash(python -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")"
+      "Bash(python -c \"import yaml,sys; yaml.safe_load\\(open\\('docker-compose.yml'\\)\\); print\\('YAML OK'\\)\")",
+      "Bash(docker-compose down *)",
+      "Bash(docker-compose up *)",
+      "Bash(docker-compose exec *)",
+      "Bash(docker-compose logs *)",
+      "Bash(make inject-alert *)",
+      "Bash(make kafka-read-ripple *)",
+      "Bash(git add *)",
+      "Bash(git commit -m 'session 4: merged GTFS feed, feeder-route mapping, compacted alert topics, ripple detector *)"
     ]
   }
 }

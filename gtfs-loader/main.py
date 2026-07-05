@@ -1,12 +1,14 @@
 """One-shot loader for TTC static GTFS data.
 
-Downloads the TTC surface GTFS zip, computes scheduled headway per route per
-hour of day, and loads the results into TimescaleDB. Safe to re-run: all
-writes are upserts.
+Downloads the City of Toronto's merged GTFS zip (all modes: subway,
+streetcar, bus), computes scheduled headway per route per hour of day, maps
+which surface routes feed each subway station, and loads the results into
+TimescaleDB. Safe to re-run: every table is fully refreshed.
 """
 
 import csv
 import io
+import math
 import os
 import sys
 import zipfile
@@ -17,10 +19,30 @@ import psycopg2
 import psycopg2.extras
 import requests
 
+# "Merged GTFS - TTC Routes and Schedules" on open.toronto.ca — covers all
+# modes, unlike the surface-only SurfaceGTFS.zip this project used originally.
 GTFS_URL = os.environ.get(
     "GTFS_URL",
-    "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/bd4809dd-e289-4de8-bbde-c5c00dafbf4f/resource/28514055-d011-4ed7-8bb0-97961dfe2b66/download/SurfaceGTFS.zip",
+    "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/b811ead4-6eaf-4adb-8408-d389fb5a069c/resource/c920e221-7a1c-488b-8c5b-6d8cd4e85eaf/download/completegtfs.zip",
 )
+
+# Surface stops within this distance of a subway station are considered to
+# feed it. Tunable: large interchange stations (Kennedy, Finch, Scarborough
+# Centre) have bus bays spread further out and may warrant a larger radius.
+FEEDER_RADIUS_M = 300
+
+EARTH_RADIUS_M = 6_371_000
+
+SUBWAY_ROUTE_TYPE = 1
+
+
+def haversine_m(lat1, lon1, lat2, lon2):
+    """Great-circle distance in meters between two lat/lon points."""
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = phi2 - phi1
+    dlmb = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlmb / 2) ** 2
+    return 2 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 
 
 def db_connect():
@@ -85,6 +107,59 @@ def select_weekday_services(zf):
     return groups[window]
 
 
+def compute_feeder_routes(stops, stop_routes, routes):
+    """Map each subway station to the surface routes that feed it.
+
+    Subway stations are identified as the parent stations of platform stops
+    served by route_type=1 trips — location_type=1 alone is NOT reliable in
+    the TTC merged feed (it also marks bus terminal loops like Westmore).
+
+    Returns {(station_id, route_short_name): (station_name, min_distance_m)}.
+    """
+    subway_route_ids = {
+        rid for rid, (_, rtype) in routes.items() if rtype == SUBWAY_ROUTE_TYPE
+    }
+
+    station_ids = set()
+    for stop_id, rids in stop_routes.items():
+        if rids & subway_route_ids and stop_id in stops:
+            parent = stops[stop_id][4]
+            if parent and parent in stops:
+                station_ids.add(parent)
+
+    # Surface stops: anything that has service from at least one non-subway
+    # route and is not itself a station node.
+    surface_stops = []
+    for stop_id, rids in stop_routes.items():
+        info = stops.get(stop_id)
+        if info is None or info[3] == "1":
+            continue
+        surface_rids = rids - subway_route_ids
+        if surface_rids:
+            surface_stops.append((stop_id, info[0], info[1], surface_rids))
+
+    feeders = {}
+    # ~0.003 degrees latitude ≈ 330 m; cheap bounding-box prefilter so we
+    # don't run haversine against every stop in the city for every station.
+    lat_margin = math.degrees(FEEDER_RADIUS_M / EARTH_RADIUS_M) * 1.2
+    for station_id in station_ids:
+        s_lat, s_lon, s_name = stops[station_id][0], stops[station_id][1], stops[station_id][2]
+        for _, lat, lon, surface_rids in surface_stops:
+            if abs(lat - s_lat) > lat_margin:
+                continue
+            distance = haversine_m(s_lat, s_lon, lat, lon)
+            if distance > FEEDER_RADIUS_M:
+                continue
+            for rid in surface_rids:
+                short_name = routes[rid][0] or rid
+                key = (station_id, short_name)
+                existing = feeders.get(key)
+                if existing is None or distance < existing[1]:
+                    feeders[key] = (s_name, distance)
+
+    return station_ids, feeders
+
+
 def main():
     zf = download_gtfs(GTFS_URL)
 
@@ -124,21 +199,48 @@ def main():
         trip_to_route[row["trip_id"]] = (route_id, direction or "0")
     print(f"  {len(all_trips)} trips total, {len(trip_to_route)} weekday trips", flush=True)
 
+    print("parsing stops.txt ...", flush=True)
+    # stop_id -> (lat, lon, name, location_type, parent_station)
+    stops = {}
+    for row in read_csv(zf, "stops.txt"):
+        try:
+            lat, lon = float(row["stop_lat"]), float(row["stop_lon"])
+        except (KeyError, ValueError):
+            continue
+        stops[row["stop_id"]] = (
+            lat, lon, row.get("stop_name", ""),
+            row.get("location_type", "").strip(),
+            row.get("parent_station", "").strip(),
+        )
+    print(f"  {len(stops)} stops", flush=True)
+
+    all_trip_to_route = {trip_id: route_id for trip_id, route_id, _ in all_trips}
+
     print("parsing stop_times.txt (streaming, this is the big one) ...", flush=True)
-    # First stop of each trip = (lowest stop_sequence, its arrival_time)
+    # One pass accumulates two things: the first stop of each trip (lowest
+    # stop_sequence + its arrival_time) for headway computation, and the set
+    # of routes serving each stop (across all service days) for the
+    # feeder-route mapping.
     trip_first_arrival = {}
+    stop_routes = defaultdict(set)
     rows = 0
     for row in read_csv(zf, "stop_times.txt"):
         rows += 1
+        trip_id = row["trip_id"]
+
+        route_id = all_trip_to_route.get(trip_id)
+        if route_id is not None:
+            stop_routes[row["stop_id"]].add(route_id)
+
         arrival = row.get("arrival_time", "").strip()
         if not arrival:
             continue
-        trip_id = row["trip_id"]
         seq = int(row["stop_sequence"])
         current = trip_first_arrival.get(trip_id)
         if current is None or seq < current[0]:
             trip_first_arrival[trip_id] = (seq, arrival)
-    print(f"  {rows} stop_time rows, {len(trip_first_arrival)} trips with arrivals", flush=True)
+    print(f"  {rows} stop_time rows, {len(trip_first_arrival)} trips with arrivals, "
+          f"{len(stop_routes)} stops with service", flush=True)
 
     # Count trips per route per direction per hour, based on each trip's first
     # departure. Keyed by route_short_name (e.g. "504"), not the TTC-internal
@@ -166,6 +268,10 @@ def main():
         key: 60.0 / count for key, count in max_dir_count.items() if count > 0
     }
     print(f"computed {len(headways)} (route, hour) headway entries", flush=True)
+
+    station_ids, feeders = compute_feeder_routes(stops, stop_routes, routes)
+    print(f"computed {len(feeders)} feeder-route relationships "
+          f"for {len(station_ids)} subway stations (radius {FEEDER_RADIUS_M}m)", flush=True)
 
     conn = db_connect()
     conn.autocommit = False
@@ -200,10 +306,33 @@ def main():
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS station_feeder_routes (
+              station_id TEXT NOT NULL,
+              station_name TEXT NOT NULL,
+              route_id TEXT NOT NULL,
+              distance_meters DOUBLE PRECISION NOT NULL,
+              PRIMARY KEY (station_id, route_id)
+            );
+            """
+        )
+
         # Full refresh: stale rows from a previous feed version would
         # otherwise linger forever, since we only upsert below.
         cur.execute("DELETE FROM scheduled_headways;")
         cur.execute("DELETE FROM trips;")
+        cur.execute("DELETE FROM station_feeder_routes;")
+
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO station_feeder_routes (station_id, station_name, route_id, distance_meters) VALUES %s",
+            [
+                (station_id, name, short_name, round(distance, 1))
+                for (station_id, short_name), (name, distance) in feeders.items()
+            ],
+            page_size=1000,
+        )
 
         psycopg2.extras.execute_values(
             cur,
@@ -237,7 +366,22 @@ def main():
     conn.close()
 
     print(f"\nloaded {len(routes)} routes, {len(all_trips)} trips, "
-          f"and {len(headways)} scheduled headway rows into TimescaleDB")
+          f"{len(headways)} scheduled headway rows, and {len(feeders)} "
+          f"feeder-route rows ({len(station_ids)} subway stations) into TimescaleDB")
+
+    # Sanity check: feeder routes for Bloor-Yonge
+    print("\nBloor-Yonge feeder routes (surface routes within "
+          f"{FEEDER_RADIUS_M}m):")
+    by_feeders = sorted(
+        (short, name, dist)
+        for (sid, short), (name, dist) in feeders.items()
+        if "bloor-yonge" in name.lower()
+    )
+    if by_feeders:
+        for short, _, dist in by_feeders:
+            print(f"  route {short:>4}  nearest stop {dist:.0f}m")
+    else:
+        print("  (none found — check station identification)")
 
     # Summary for route 504 (King streetcar)
     print("\nroute 504 (King) scheduled headways by hour:")

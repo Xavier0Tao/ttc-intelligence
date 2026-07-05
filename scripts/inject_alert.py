@@ -19,9 +19,10 @@ TOPIC = "service-alerts"
 SUBJECT = "service-alerts-value"
 SCHEMA_FILE = os.environ.get("SCHEMA_FILE", "/app/schemas/service_alert.avsc")
 
-# Sample Line 1 station stop ids (demo placeholders; override with real GTFS
-# stop ids via ALERT_STOPS when accuracy matters).
-DEFAULT_STOPS = "14404,14406,14408"
+# Real GTFS parent-station ids from the merged feed (see the
+# station_feeder_routes table): Bloor-Yonge=99999, St George=99972. These must
+# match station_feeder_routes.station_id for the ripple detector to cascade.
+DEFAULT_STOPS = "99999,99972"
 
 
 def csv_env(name, default):

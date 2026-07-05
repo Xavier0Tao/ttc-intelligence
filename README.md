@@ -67,7 +67,7 @@ ttc-intelligence/
 ├── gtfs-loader/           Python — one-shot static GTFS → TimescaleDB loader
 ├── delay-predictor/       Java + Kafka Streams — headway/delay scoring
 ├── crowding-estimator/    Java + Kafka Streams — per-vehicle crowding levels
-├── ripple-detector/       Java + Kafka Streams (stub)
+├── ripple-detector/       Java + Kafka Streams — cascades subway alerts to feeder routes
 ├── api-gateway/           Java + Spring Boot (stub)
 ├── scripts/               Demo tooling (service-alert injector)
 ├── dashboard/             React (not yet scaffolded)
@@ -82,6 +82,12 @@ ttc-intelligence/
 Events are serialized as **Avro** using the Confluent wire format (magic byte + 4-byte schema id + Avro binary). All schemas live in the shared `schemas/` directory — `vehicle_position.avsc` (subject `vehicle-positions-value`, currently at version 2 after a backward-compatible evolution adding `trip_id`/`direction_id`/`current_stop_sequence`) and `service_alert.avsc` (subject `service-alerts-value`). The ingestion service registers both at startup; the Java services generate their record classes from the same files at build time via `avro-maven-plugin` (`../schemas` relative to each pom).
 
 One TTC-specific wrinkle: the live feed populates `trip_id` and `current_stop_sequence` but **not** `direction_id`. The GTFS loader therefore also loads a `trips` (trip_id → direction_id) lookup table, which the crowding estimator holds in memory to resolve direction per vehicle.
+
+`service-alerts` and `ripple-alerts` are **compacted topics** keyed by `alert_id` / `ripple_id`: the latest state per alert is retained indefinitely while superseded versions are eventually cleaned. The ripple detector consumes `service-alerts` as a KTable, giving upsert-by-key semantics regardless of compaction timing.
+
+## Static data (TimescaleDB)
+
+The `gtfs-loader` downloads the City of Toronto's **merged GTFS** feed (all modes — subway, streetcar, bus) and full-refreshes four tables: `routes`, `trips` (direction lookup), `scheduled_headways` (per route number per hour, weekday service, busier direction), and `station_feeder_routes` — a geospatial mapping of which surface routes stop within 300 m (haversine) of each of the 70 subway stations. Subway stations are identified as parent stations of `route_type=1`-served platforms, because `location_type=1` alone also marks bus terminal loops in the TTC feed.
 
 ## Local setup
 
@@ -107,6 +113,7 @@ make logs            # all logs
 make logs-ingest     # ingestion service only
 make logs-delay      # delay predictor only
 make logs-crowding   # crowding estimator only
+make logs-ripple     # ripple detector only
 make schema-list     # registered Schema Registry subjects
 make down            # stop everything
 ```
@@ -126,6 +133,13 @@ make kafka-read           # live vehicle-position events (Avro → JSON)
 make kafka-read-delays    # per-route delay predictions
 make kafka-read-crowding  # per-vehicle crowding estimates
 make kafka-read-alerts    # service alerts (real + injected)
+make kafka-read-ripple    # cascade alerts for feeder routes
+```
+
+Ripple alerts — one message per feeder route affected by a subway alert:
+
+```json
+{"ripple_id":"DEMO-1783225103-97","source_alert_id":"DEMO-1783225103","source_effect":"NO_SERVICE","affected_station":"Bloor-Yonge","feeder_route_id":"97","predicted_impact":"LIKELY_CROWDING_INCREASE","header_text":"Feeder route 97 near Bloor-Yonge station: Line 1: No service between Bloor-Yonge and St George","detected_at":1783225104572}
 ```
 
 Delay predictions — one message per active route per 5-minute window:

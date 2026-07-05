@@ -1,4 +1,4 @@
-.PHONY: up down logs logs-ingest logs-delay logs-crowding ingest schema-list load-gtfs kafka-read kafka-read-delays kafka-read-alerts kafka-read-crowding inject-alert status
+.PHONY: up down logs logs-ingest logs-delay logs-crowding logs-ripple ingest schema-list load-gtfs kafka-read kafka-read-delays kafka-read-alerts kafka-read-crowding kafka-read-ripple inject-alert status
 
 up:
 	docker-compose up -d
@@ -35,6 +35,12 @@ logs-crowding:
 
 kafka-read-crowding:
 	docker-compose exec kafka bash -c "kafka-console-consumer --bootstrap-server localhost:9092 --topic crowding-estimates --from-beginning --timeout-ms 30000 2>/dev/null | tail -10"
+
+logs-ripple:
+	docker-compose logs -f ripple-detector
+
+kafka-read-ripple:
+	docker-compose exec kafka bash -c "kafka-console-consumer --bootstrap-server localhost:9092 --topic ripple-alerts --from-beginning --timeout-ms 30000 2>/dev/null | tail -10"
 
 inject-alert:
 	docker-compose build alert-injector && docker-compose run --rm alert-injector
