@@ -4,9 +4,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 // vehicle); rendering per-message would thrash React. Updates accumulate in a
 // ref and flush to state on a short interval instead.
 const FLUSH_INTERVAL_MS = 500;
-// Client-side prune of vehicles whose feed timestamp has gone stale (the
+// Client-side prune of vehicles this page hasn't heard from in a while (the
 // server's Redis TTL handles the snapshot; this handles a long-lived page).
-const STALE_VEHICLE_S = 180;
+// Staleness is measured from the client's own receipt time (_seenAtMs),
+// NOT the feed's embedded vehicle.timestamp: that's the vehicle's last GPS
+// fix, which routinely lags real time by minutes even for actively-tracked
+// vehicles, and comparing it against wall-clock time evicted almost
+// everything within one flush cycle.
+const STALE_VEHICLE_MS = 180_000;
 const BACKOFF_START_MS = 1000;
 const BACKOFF_CAP_MS = 30000;
 
@@ -18,6 +23,13 @@ function emptyPending() {
     alerts: new Map(),
     ripples: new Map(),
   };
+}
+
+// Debug aid: per-type counts of received WS messages, inspectable from the
+// browser console as window.__feedStats.
+const feedStats = {};
+if (typeof window !== 'undefined') {
+  window.__feedStats = feedStats;
 }
 
 export default function useLiveFeed() {
@@ -33,13 +45,13 @@ export default function useLiveFeed() {
   const disposedRef = useRef(false);
 
   const applySnapshot = useCallback((snap) => {
-    const toMap = (items, key) => {
+    const toMap = (items, key, stamp) => {
       const m = new Map();
-      (items || []).forEach((x) => x && x[key] && m.set(x[key], x));
+      (items || []).forEach((x) => x && x[key] && m.set(x[key], stamp ? { ...x, _seenAtMs: Date.now() } : x));
       return m;
     };
     pendingRef.current = emptyPending();
-    setVehicles(toMap(snap.vehicles, 'vehicle_id'));
+    setVehicles(toMap(snap.vehicles, 'vehicle_id', true));
     setDelays(toMap(snap.delays, 'route_id'));
     setAlerts(toMap(snap.alerts, 'alert_id'));
     setRipples(toMap(snap.ripples, 'ripple_id'));
@@ -72,6 +84,7 @@ export default function useLiveFeed() {
         } catch {
           return;
         }
+        feedStats[msg.type] = (feedStats[msg.type] || 0) + 1;
         const p = pendingRef.current;
         const d = msg.data;
         switch (msg.type) {
@@ -120,48 +133,50 @@ export default function useLiveFeed() {
     connect();
 
     const flusher = setInterval(() => {
-      const p = pendingRef.current;
+      // Detach the accumulated batch FIRST: React batches setState from
+      // intervals, so the updater closures below run later, at render time.
+      // If we mutated/reset the pending maps after calling setState (the
+      // original bug), the updaters would see already-emptied maps and every
+      // live update would be silently discarded.
+      const batch = pendingRef.current;
+      pendingRef.current = emptyPending();
 
-      if (p.vehicles.size || p.crowding.size) {
-        setVehicles((prev) => {
-          const next = new Map(prev);
-          p.vehicles.forEach((v, id) => next.set(id, { ...next.get(id), ...v }));
-          p.crowding.forEach((c, id) => {
-            const cur = next.get(id);
-            if (cur) next.set(id, { ...cur, crowding_level: c.crowding_level });
-          });
-          const cutoff = Date.now() / 1000 - STALE_VEHICLE_S;
-          next.forEach((v, id) => {
-            if (v.timestamp && v.timestamp < cutoff) next.delete(id);
-          });
-          return next;
+      // Vehicles flush runs every tick even with an empty batch so the
+      // staleness prune keeps working when the feed goes quiet.
+      setVehicles((prev) => {
+        const next = new Map(prev);
+        const now = Date.now();
+        batch.vehicles.forEach((v, id) => next.set(id, { ...next.get(id), ...v, _seenAtMs: now }));
+        batch.crowding.forEach((c, id) => {
+          const cur = next.get(id);
+          if (cur) next.set(id, { ...cur, crowding_level: c.crowding_level });
         });
-        p.vehicles = new Map();
-        p.crowding = new Map();
-      }
-      if (p.delays.size) {
+        const cutoff = now - STALE_VEHICLE_MS;
+        next.forEach((v, id) => {
+          if (v._seenAtMs && v._seenAtMs < cutoff) next.delete(id);
+        });
+        return next;
+      });
+      if (batch.delays.size) {
         setDelays((prev) => {
           const next = new Map(prev);
-          p.delays.forEach((v, id) => next.set(id, v));
+          batch.delays.forEach((v, id) => next.set(id, v));
           return next;
         });
-        p.delays = new Map();
       }
-      if (p.alerts.size) {
+      if (batch.alerts.size) {
         setAlerts((prev) => {
           const next = new Map(prev);
-          p.alerts.forEach((v, id) => next.set(id, v));
+          batch.alerts.forEach((v, id) => next.set(id, v));
           return next;
         });
-        p.alerts = new Map();
       }
-      if (p.ripples.size) {
+      if (batch.ripples.size) {
         setRipples((prev) => {
           const next = new Map(prev);
-          p.ripples.forEach((v, id) => next.set(id, v));
+          batch.ripples.forEach((v, id) => next.set(id, v));
           return next;
         });
-        p.ripples = new Map();
       }
     }, FLUSH_INTERVAL_MS);
 

@@ -107,7 +107,11 @@ func pollAndPublishVehicles(client *http.Client, writer *kafka.Writer, codec *go
 		return
 	}
 
-	published := 0
+	// All of a poll's events go out in ONE WriteMessages call: kafka-go's
+	// Writer flushes per call (or per BatchTimeout, default 1s), so writing
+	// message-by-message caps throughput at ~1 msg/s — a full TTC feed of
+	// ~2000 vehicles would take half an hour per "poll".
+	messages := make([]kafka.Message, 0, len(feed.GetEntity()))
 	for _, entity := range feed.GetEntity() {
 		vehicle := entity.GetVehicle()
 		if vehicle == nil {
@@ -120,17 +124,17 @@ func pollAndPublishVehicles(client *http.Client, writer *kafka.Writer, codec *go
 			log.Printf("error encoding vehicle event: %v", err)
 			continue
 		}
-		if err := produce(writer, vehicleID, payload); err != nil {
-			log.Printf("error producing vehicle message: %v", err)
-			continue
-		}
-
-		log.Printf("published vehicle position: vehicle_id=%s route_id=%s lat=%.5f lon=%.5f",
-			vehicleID, native["route_id"], native["latitude"], native["longitude"])
-		published++
+		messages = append(messages, kafka.Message{
+			Key:   []byte(vehicleID),
+			Value: payload,
+		})
 	}
 
-	log.Printf("Vehicles poll: %d positions published", published)
+	if err := produceBatch(writer, messages); err != nil {
+		log.Printf("error producing vehicle batch: %v", err)
+		return
+	}
+	log.Printf("Vehicles poll: %d positions published", len(messages))
 }
 
 func vehicleToAvroNative(v *gtfs.VehiclePosition) (string, map[string]interface{}) {
@@ -219,8 +223,16 @@ func pollAndPublishAlerts(client *http.Client, writer *kafka.Writer, codec *goav
 		feedTimestamp = time.Now().Unix()
 	}
 
+	type pendingAlert struct {
+		id          string
+		fingerprint string
+		header      interface{}
+		effect      interface{}
+	}
+
 	active := 0
-	newPublished := 0
+	messages := make([]kafka.Message, 0)
+	pending := make([]pendingAlert, 0)
 	for _, entity := range feed.GetEntity() {
 		alert := entity.GetAlert()
 		if alert == nil {
@@ -241,18 +253,25 @@ func pollAndPublishAlerts(client *http.Client, writer *kafka.Writer, codec *goav
 			log.Printf("error encoding alert %s: %v", alertID, err)
 			continue
 		}
-		if err := produce(writer, alertID, payload); err != nil {
-			log.Printf("error producing alert message: %v", err)
-			continue
-		}
-
-		publishedAlerts[alertID] = fingerprint
-		newPublished++
-		log.Printf("published service alert: alert_id=%s effect=%s header=%q",
-			alertID, native["effect"], native["header_text"])
+		messages = append(messages, kafka.Message{
+			Key:   []byte(alertID),
+			Value: payload,
+		})
+		pending = append(pending, pendingAlert{alertID, fingerprint, native["header_text"], native["effect"]})
 	}
 
-	log.Printf("Alerts poll: %d active, %d new published", active, newPublished)
+	// Single batch write per poll (see pollAndPublishVehicles for why);
+	// dedup state only advances once the batch is actually accepted.
+	if err := produceBatch(writer, messages); err != nil {
+		log.Printf("error producing alert batch: %v", err)
+		return
+	}
+	for _, a := range pending {
+		publishedAlerts[a.id] = a.fingerprint
+		log.Printf("published service alert: alert_id=%s effect=%s header=%q", a.id, a.effect, a.header)
+	}
+
+	log.Printf("Alerts poll: %d active, %d new published", active, len(pending))
 }
 
 func alertToAvroNative(alertID string, a *gtfs.Alert, feedTimestamp int64) map[string]interface{} {
@@ -325,13 +344,13 @@ func firstTranslation(ts *gtfs.TranslatedString) string {
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-func produce(writer *kafka.Writer, key string, payload []byte) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func produceBatch(writer *kafka.Writer, messages []kafka.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	return writer.WriteMessages(ctx, kafka.Message{
-		Key:   []byte(key),
-		Value: payload,
-	})
+	return writer.WriteMessages(ctx, messages...)
 }
 
 func loadSchema(schemasDir, filename string) (string, error) {
